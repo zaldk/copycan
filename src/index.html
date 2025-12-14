@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Copycan</title>
+    <style>
+        :root { --bg: #121212; --surface: #1e1e1e; --primary: #bb86fc; --on-surface: #e0e0e0; --error: #cf6679; --success: #03dac6; }
+        body { background-color: var(--bg); color: var(--on-surface); font-family: 'Courier New', monospace; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; }
+        .container { width: 100%; max-width: 800px; background: var(--surface); padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.5); }
+        h1 { color: var(--primary); margin-top: 0; }
+        textarea { width: 100%; height: 200px; background: #2d2d2d; border: 1px solid #444; color: #fff; padding: 10px; box-sizing: border-box; resize: vertical; margin-bottom: 10px; }
+        .controls { display: flex; gap: 10px; align-items: center; margin-bottom: 15px; flex-wrap: wrap; }
+        input, select { background: #2d2d2d; border: 1px solid #444; color: white; padding: 8px; border-radius: 4px; }
+        button { background: var(--primary); color: #000; border: none; padding: 10px 20px; font-weight: bold; cursor: pointer; border-radius: 4px; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .status-box { padding: 10px; margin-top: 10px; border-radius: 4px; font-size: 0.9em; display: none; }
+        .visible { display: block; }
+        .info { background: #333; color: #ccc; }
+        .error { background: rgba(207,102,121,0.2); color: var(--error); border: 1px solid var(--error); }
+        .success { background: rgba(3,218,198,0.2); color: var(--success); border: 1px solid var(--success); }
+
+        /* Auth Tabs */
+        .tabs { display: flex; border-bottom: 1px solid #444; margin-bottom: 15px; }
+        .tab { padding: 10px 20px; cursor: pointer; border-bottom: 2px solid transparent; opacity: 0.7; }
+        .tab.active { border-bottom-color: var(--primary); opacity: 1; font-weight: bold; }
+        .auth-form { display: none; gap: 10px; flex-wrap: wrap; }
+        .auth-form.active { display: flex; }
+
+        #user-info { display: none; align-items: center; gap: 10px; color: var(--success); }
+        ul#recent-list { list-style: none; padding: 0; margin-top: 20px; }
+        ul#recent-list li { border-bottom: 1px solid #333; padding: 8px 0; display: flex; justify-content: space-between; }
+        a { color: var(--primary); text-decoration: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Copycan</h1>
+        <p style="color:#888; font-size:0.9em;">Secure. Anonymous. Expiring.</p>
+
+        <!-- Auth Section -->
+        <div id="auth-container">
+            <div class="tabs">
+                <div class="tab active" onclick="switchTab('login')">Login</div>
+                <div class="tab" onclick="switchTab('register')">Register</div>
+            </div>
+
+            <!-- Login Form -->
+            <div id="login-form" class="auth-form active controls">
+                <input type="text" id="l-user" placeholder="Username">
+                <input type="password" id="l-pass" placeholder="Password">
+                <button onclick="doLogin()">Login</button>
+            </div>
+
+            <!-- Register Form -->
+            <div id="register-form" class="auth-form controls">
+                <input type="text" id="r-user" placeholder="Choose Username">
+                <input type="password" id="r-pass" placeholder="Choose Password">
+                <button onclick="doRegister()">Create Account</button>
+            </div>
+        </div>
+
+        <!-- Logged In State -->
+        <div id="user-info" class="controls">
+            <span>Logged in as <b id="display-user"></b></span>
+            <button onclick="doLogout()" style="background:#cf6679; color:white;">Logout</button>
+        </div>
+
+        <!-- Main Interface -->
+        <textarea id="content" placeholder="Paste content here..."></textarea>
+        <div class="controls">
+            <label>Expires:</label>
+            <select id="expiration">
+                <option value="60">1 Minute</option>
+                <option value="3600" selected>1 Hour</option>
+                <option value="86400">1 Day</option>
+            </select>
+            <button onclick="mineAndSubmit()" id="btn-submit">Mine & Submit</button>
+        </div>
+
+        <div id="log-box" class="status-box info"></div>
+
+        <hr style="border-color:#333; margin:20px 0;">
+        <h3>Recent</h3>
+        <ul id="recent-list"><li><small>Loading...</small></li></ul>
+    </div>
+
+    <script>
+        let authToken = null;
+
+        function setLog(msg, type='info') {
+            const el = document.getElementById('log-box');
+            el.innerText = msg;
+            el.className = `status-box visible ${type}`;
+        }
+
+        function switchTab(tab) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.auth-form').forEach(f => f.classList.remove('active'));
+
+            if(tab === 'login') {
+                document.querySelector('.tab:nth-child(1)').classList.add('active');
+                document.getElementById('login-form').classList.add('active');
+            } else {
+                document.querySelector('.tab:nth-child(2)').classList.add('active');
+                document.getElementById('register-form').classList.add('active');
+            }
+        }
+
+        // --- Auth Logic ---
+
+        window.onload = function() {
+            checkSession();
+            loadRecent();
+        };
+
+        function checkSession() {
+            const token = localStorage.getItem('copycan_token');
+            const user = localStorage.getItem('copycan_user');
+            if(token && user) {
+                authToken = token;
+                showLoggedIn(user);
+            }
+        }
+
+        function showLoggedIn(user) {
+            document.getElementById('auth-container').style.display = 'none';
+            document.getElementById('user-info').style.display = 'flex';
+            document.getElementById('display-user').innerText = user;
+        }
+
+        function doLogout() {
+            localStorage.removeItem('copycan_token');
+            localStorage.removeItem('copycan_user');
+            authToken = null;
+            location.reload();
+        }
+
+        async function doRegister() {
+            const u = document.getElementById('r-user').value;
+            const p = document.getElementById('r-pass').value;
+            if(!u || !p) return setLog("Fill all fields", "error");
+
+            try {
+                // 1. Register
+                const r = await fetch('/api/register', {
+                    method: 'POST',
+                    body: JSON.stringify({username: u, password: p})
+                });
+
+                if(r.status === 201) {
+                    setLog("Account created! Logging in...", "info");
+
+                    // 2. Auto-Login using credentials
+                    const loginResp = await fetch('/login', {
+                        method: 'POST',
+                        body: JSON.stringify({username: u, password: p})
+                    });
+
+                    if (loginResp.ok) {
+                        const d = await loginResp.json();
+                        authToken = d.token;
+                        localStorage.setItem('copycan_token', d.token);
+                        localStorage.setItem('copycan_user', d.username);
+                        showLoggedIn(d.username);
+                        setLog("Account created & logged in!", "success");
+                    } else {
+                        // Fallback if login fails for some reason
+                        setLog("Account created, please login manually.", "info");
+                        switchTab('login');
+                        document.getElementById('l-user').value = u;
+                    }
+                } else {
+                    setLog(await r.text(), "error");
+                }
+            } catch(e) {
+                setLog("Network Error", "error");
+            }
+        }
+
+        async function doLogin() {
+            const u = document.getElementById('l-user').value;
+            const p = document.getElementById('l-pass').value;
+
+            try {
+                const r = await fetch('/login', {
+                    method: 'POST',
+                    body: JSON.stringify({username: u, password: p})
+                });
+                if(r.ok) {
+                    const d = await r.json();
+                    authToken = d.token;
+                    localStorage.setItem('copycan_token', d.token);
+                    localStorage.setItem('copycan_user', d.username);
+                    showLoggedIn(d.username);
+                    setLog("Authenticated", "success");
+                } else {
+                    setLog("Invalid Credentials", "error");
+                }
+            } catch(e) { setLog("Network Error", "error"); }
+        }
+
+        // --- Mining Logic ---
+
+        function getRandomPrefix() {
+            return Math.floor(Math.random() * (999999999 - 100000000 + 1) + 100000000).toString();
+        }
+
+        async function mineAndSubmit() {
+            if(!authToken) return setLog("Login Required", "error");
+            const content = document.getElementById('content').value;
+            if(!content) return setLog("No content", "error");
+
+            const exp = parseInt(document.getElementById('expiration').value);
+            const btn = document.getElementById('btn-submit');
+            btn.disabled = true;
+            setLog("Mining... (Target: 4 hex zeroes)", "info");
+
+            const enc = new TextEncoder();
+            let attempts = 0;
+
+            async function loop() {
+                for(let i=0; i<3000; i++) {
+                    attempts++;
+                    const prefix = getRandomPrefix();
+                    const buf = await crypto.subtle.digest('SHA-256', enc.encode(prefix + content));
+                    const h = new Uint8Array(buf);
+
+                    if(h[31]===0 && h[30]===0) {
+                        return submit(content, prefix, exp);
+                    }
+                }
+                if(attempts % 30000 === 0) setLog(`Mining... (${attempts})`, "info");
+                setTimeout(loop, 0);
+            }
+            loop();
+        }
+
+        async function submit(content, prefix, exp) {
+            setLog("Found! Submitting...", "info");
+            try {
+                const r = await fetch('/api/pastes', {
+                    method: 'POST',
+                    headers: { 'Authorization': 'Bearer ' + authToken, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ content, prefix, expiration: exp })
+                });
+                if(r.ok) {
+                    const d = await r.json();
+                    setLog("Success! ID: " + d.id, "success");
+                    document.getElementById('content').value = "";
+                    loadRecent();
+                } else {
+                    setLog("Error: " + await r.text(), "error");
+                }
+            } catch(e) { setLog("Network Error", "error"); }
+            document.getElementById('btn-submit').disabled = false;
+        }
+
+        async function loadRecent() {
+            try {
+                const r = await fetch('/api/pastes');
+                const d = await r.json();
+                document.getElementById('recent-list').innerHTML = d.map(x =>
+                    `<li><a href="/api/pastes/${x.id}" target="_blank">${x.id}</a> <span>${x.created_at}</span></li>`
+                ).join('');
+            } catch(e) {}
+        }
+    </script>
+</body>
+</html>
