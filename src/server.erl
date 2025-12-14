@@ -4,36 +4,67 @@
 -define(SECRET, <<"SuperSecretKey">>).
 
 start(Port, ChallengerPorts) ->
-    io:format("[Server] Listening on ~p~n", [Port]),
-    {ok, ListenSocket} = gen_tcp:listen(Port, [binary, {packet, 0}, {active, false}, {reuseaddr, true}]),
+    % Ensure SSL application is started
+    application:ensure_all_started(ssl),
+
+    io:format("[Server] Starting SSL listener on ~p~n", [Port]),
+
+    % SSL Options
+    SslOpts = [
+        {certfile, "../ssl/cert.pem"},
+        {keyfile, "../ssl/key.pem"},
+        {reuseaddr, true},
+        {active, false},
+        binary,
+        {packet, 0}
+    ],
+
+    {ok, ListenSocket} = ssl:listen(Port, SslOpts),
     accept_loop(ListenSocket, ChallengerPorts).
 
-accept_loop(Socket, ChallengerPorts) ->
-    {ok, Conn} = gen_tcp:accept(Socket),
-    Pid = spawn(fun() -> handle(Conn, ChallengerPorts) end),
-    gen_tcp:controlling_process(Conn, Pid),
-    accept_loop(Socket, ChallengerPorts).
+accept_loop(ListenSocket, ChallengerPorts) ->
+    % 1. Accept the TCP connection (Transport layer)
+    case ssl:transport_accept(ListenSocket) of
+        {ok, TLSSocket} ->
+            % 2. Spawn process to handle the SSL Handshake & Request
+            Pid = spawn(fun() -> handshake_and_handle(TLSSocket, ChallengerPorts) end),
+            % 3. Transfer ownership so the new process handles the socket
+            ssl:controlling_process(TLSSocket, Pid),
+            accept_loop(ListenSocket, ChallengerPorts);
+        {error, _} ->
+            accept_loop(ListenSocket, ChallengerPorts)
+    end.
+
+handshake_and_handle(TLSSocket, ChallengerPorts) ->
+    % 4. Perform SSL Handshake
+    case ssl:handshake(TLSSocket) of
+        {ok, _SslSocket} ->
+            handle(TLSSocket, ChallengerPorts);
+        {error, _Reason} ->
+            ssl:close(TLSSocket)
+    end.
 
 handle(Socket, ChallengerPorts) ->
-    case gen_tcp:recv(Socket, 0, 5000) of
+    % Use ssl:recv instead of gen_tcp:recv
+    case ssl:recv(Socket, 0, 5000) of
         {ok, Data} when is_binary(Data) ->
             case parse_request(Data) of
                 {Method, Path, Headers, Body} ->
                     Response = route(Method, Path, Headers, Body, ChallengerPorts),
-                    gen_tcp:send(Socket, Response);
+                    ssl:send(Socket, Response);
                 error ->
-                    gen_tcp:send(Socket, response(400, <<"Bad Request">>))
+                    ssl:send(Socket, response(400, <<"Bad Request">>))
             end;
         _ -> ok
     end,
-    gen_tcp:close(Socket).
+    ssl:close(Socket).
 
 %% --- Routes ---
 
 route(<<"POST">>, <<"/api/register">>, _H, Body, _CP) ->
     try json:decode(Body) of
         #{<<"username">> := User, <<"password">> := Pass} ->
-            case db:create_user(binary_to_list(User), binary_to_list(Pass)) of
+            case db:create_user(User, Pass) of
                 ok -> response(201, <<"User created">>);
                 {error, exists} -> response(409, <<"Username taken">>);
                 {error, invalid_username} -> response(400, <<"Invalid username">>)
@@ -44,7 +75,7 @@ route(<<"POST">>, <<"/api/register">>, _H, Body, _CP) ->
 route(<<"POST">>, <<"/login">>, _H, Body, _CP) ->
     try json:decode(Body) of
         #{<<"username">> := User, <<"password">> := Pass} ->
-            case db:check_user(binary_to_list(User), binary_to_list(Pass)) of
+            case db:check_user(User, Pass) of
                 true ->
                     Token = generate_jwt(User),
                     Json = iolist_to_binary(io_lib:format("{\"token\": \"~s\", \"username\": \"~s\"}", [Token, User])),
@@ -66,7 +97,6 @@ route(<<"GET">>, <<"/api/pastes">>, _H, _B, _CP) ->
 route(<<"GET">>, <<"/api/pastes/", ID/binary>>, _H, _B, _CP) ->
     case db:get_paste(binary_to_list(ID)) of
         {ok, Content} ->
-            % Content is now a UTF-8 binary
             response(200, [{"Content-Type", "text/plain; charset=utf-8"}], Content);
         {error, not_found} ->
             response(404, <<"Not Found or Expired">>)
@@ -101,7 +131,6 @@ process_paste(Map, RawBody, ChallengerPorts) ->
         Content =/= undefined, Prefix =/= undefined ->
             case verify_challenge(RawBody, ChallengerPorts) of
                 true ->
-                    % FIX: Pass Content (binary) directly, db:create_paste now expects it
                     {ok, ID} = db:create_paste(Content, Expiration),
                     Reply = iolist_to_binary(io_lib:format("{\"id\": \"~s\"}", [ID])),
                     response(201, [{"Content-Type", "application/json"}], Reply);
@@ -113,6 +142,7 @@ process_paste(Map, RawBody, ChallengerPorts) ->
     end.
 
 verify_challenge(Body, Ports) ->
+    % INTERNAL CONNECTION: Keeps using gen_tcp because C Challenger is HTTP
     Port = lists:nth(rand:uniform(length(Ports)), Ports),
     case gen_tcp:connect("localhost", Port, [binary, {active, false}, {packet, 0}]) of
         {ok, Sock} ->
